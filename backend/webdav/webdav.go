@@ -711,6 +711,12 @@ func (f *Fs) setQuirks(ctx context.Context, vendor string) error {
 		f.canStream = true
 		f.precision = time.Second
 		f.useOCMtime = true
+	case "openlist":
+		f.canStream = true
+		f.precision = time.Second
+		f.useOCMtime = true
+		f.useStandardProps = true
+		f.propsetMtime = true
 	case "other":
 		f.useStandardProps = true
 	default:
