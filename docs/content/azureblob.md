@@ -123,6 +123,24 @@ when `--metadata` is enabled (or when using `--metadata-set` / `--metadata-mappe
 Notes:
 - Rclone ignores reserved `x-ms-*` keys (except `x-ms-tags`) for user metadata.
 
+### Hierarchical namespace
+
+Storage accounts with hierarchical namespace enabled (Azure Data Lake
+Storage Gen2) have real directories. On these accounts rclone supports
+empty directories, creating them with `rclone mkdir` and removing
+them with `rclone rmdir`, whatever the `--azureblob-directory-markers`
+setting.
+
+Note that deleting the last file in a directory leaves the directory
+behind. Use `rclone rmdirs` or `--delete-empty-src-dirs` to remove
+empty directories.
+
+Rclone reads whether the storage account has a hierarchical namespace
+when it first uses the remote and saves it as the `hns` option in the
+config file. Set `--azureblob-hns` to override this.
+
+Blob tags (`x-ms-tags` metadata) aren't supported on these accounts.
+
 ### Performance
 
 When uploading large files, increasing the value of
@@ -354,13 +372,13 @@ be explicitly specified using exactly one of the `msi_object_id`,
 `msi_client_id`, or `msi_mi_res_id` parameters.
 
 If none of `msi_object_id`, `msi_client_id`, or `msi_mi_res_id` is
-set, this is is equivalent to using `env_auth`.
+set, this is equivalent to using `env_auth`.
 
 #### Federated Identity Credentials
 
 If these variables are set, rclone will authenticate with federated identity.
 
-- `tenant`: tenant ID of of the storage
+- `tenant`: tenant ID of the storage
 - `client_id`: client ID of the application the user will authenticate to storage
 - `msi_client_id`: managed identity client ID of the application the user will
   authenticate to
@@ -371,7 +389,7 @@ over MSI. This token is then exchanged for actual storage token using
 
 #### Azure CLI tool `az` {#use_az}
 
-Set to use the [Azure CLI tool `az`](https://learn.microsoft.com/en-us/cli/azure/)
+If `use_az` is set, use [Azure CLI tool `az`](https://learn.microsoft.com/en-us/cli/azure/)
 as the sole means of authentication.
 
 Setting this can be useful if you wish to use the `az` CLI on a host with
@@ -845,6 +863,22 @@ Properties:
 - Type:        int
 - Default:     512
 
+#### --azureblob-copy-total-concurrency
+
+Global concurrency limit for multipart copy chunks.
+
+This limits the total number of multipart copy chunks running at once
+across all files.
+
+Set to 0 to disable this limiter.
+
+Properties:
+
+- Config:      copy_total_concurrency
+- Env Var:     RCLONE_AZUREBLOB_COPY_TOTAL_CONCURRENCY
+- Type:        int
+- Default:     0
+
 #### --azureblob-use-copy-blob
 
 Whether to use the Copy Blob API when copying to the same storage account.
@@ -947,28 +981,6 @@ Properties:
 - Type:        bool
 - Default:     false
 
-#### --azureblob-memory-pool-flush-time
-
-How often internal memory buffer pools will be flushed. (no longer used)
-
-Properties:
-
-- Config:      memory_pool_flush_time
-- Env Var:     RCLONE_AZUREBLOB_MEMORY_POOL_FLUSH_TIME
-- Type:        Duration
-- Default:     1m0s
-
-#### --azureblob-memory-pool-use-mmap
-
-Whether to use mmap buffers in internal memory pool. (no longer used)
-
-Properties:
-
-- Config:      memory_pool_use_mmap
-- Env Var:     RCLONE_AZUREBLOB_MEMORY_POOL_USE_MMAP
-- Type:        bool
-- Default:     false
-
 #### --azureblob-encoding
 
 The encoding for the backend.
@@ -1062,6 +1074,25 @@ Properties:
     - Specify 'include' to remove the root blob and all its snapshots
   - "only"
     - Specify 'only' to remove only the snapshots but keep the root blob.
+
+#### --azureblob-decompress
+
+If set this will decompress gzip encoded objects.
+
+It is possible to upload objects to Azure Blob Storage with "Content-Encoding: gzip"
+set. Normally rclone will download these files as compressed objects.
+
+If this flag is set then rclone will decompress these files with
+"Content-Encoding: gzip" as they are received. This means that rclone
+can't check the size and hash but the file contents will be decompressed.
+
+
+Properties:
+
+- Config:      decompress
+- Env Var:     RCLONE_AZUREBLOB_DECOMPRESS
+- Type:        bool
+- Default:     false
 
 #### --azureblob-description
 

@@ -54,7 +54,7 @@ const (
 	rootURL             = baseURL + "api/v1"
 	maxUploadParts      = 10000 // maximum allowed number of parts in a multi-part upload
 	minChunkSize        = fs.SizeSuffix(1024 * 1024 * 5)
-	defaultUploadCutoff = fs.SizeSuffix(200 * 1024 * 1024)
+	defaultUploadCutoff = fs.SizeSuffix(5 * 1024 * 1024) // as per https://docs.drime.cloud/uploads-guide
 )
 
 // Register with Fs
@@ -145,14 +145,6 @@ If you are uploading small numbers of large files over high-speed links
 and these uploads do not fully utilize your bandwidth, then increasing
 this may help to speed up the transfers.`,
 			Default:  4,
-			Advanced: true,
-		}, {
-			Name: "upload_cutoff",
-			Help: `Cutoff for switching to chunked upload.
-
-Any files larger than this will be uploaded in chunks of chunk_size.
-The minimum is 0 and the maximum is 5 GiB.`,
-			Default:  defaultUploadCutoff,
 			Advanced: true,
 		}, {
 			Name:     config.ConfigEncoding,
@@ -278,6 +270,11 @@ var retryErrorCodes = []int{
 	503, // Service Unavailable
 	504, // Gateway Timeout
 	509, // Bandwidth Limit Exceeded
+	520, // Cloudflare: Web server returns an unknown error
+	521, // Cloudflare: Web server is down
+	522, // Cloudflare: Connection timed out
+	523, // Cloudflare: Origin is unreachable
+	524, // Cloudflare: A timeout occurred
 }
 
 // shouldRetry returns a boolean as to whether this resp and err
@@ -324,10 +321,13 @@ func (f *Fs) getItem(ctx context.Context, id string, dirID string, leaf string) 
 		}
 		return false
 	})
+	if err != nil {
+		return nil, err
+	}
 	if !found {
 		return nil, fs.ErrorObjectNotFound
 	}
-	return info, err
+	return info, nil
 }
 
 // errorHandler parses a non 2xx error response into an error
@@ -527,7 +527,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		Parameters: url.Values{},
 	}
 	if dirID != "" {
-		opts.Parameters.Add("parentIds", dirID)
+		opts.Parameters.Add("folderId", dirID)
 	}
 	if directoriesOnly {
 		opts.Parameters.Add("type", api.ItemTypeFolder)
@@ -549,6 +549,11 @@ OUTER:
 		if err != nil {
 			return found, fmt.Errorf("couldn't list files: %w", err)
 		}
+		// Drime won't page past a fixed number of entries (20,000 for
+		// rclone) and serves the last page it allows again instead
+		if result.CurrentPage != page {
+			return found, errors.New("couldn't list files: directory has more entries than drime will list")
+		}
 		for _, item := range result.Data {
 			if item.Type == api.ItemTypeFolder {
 				if filesOnly {
@@ -565,10 +570,10 @@ OUTER:
 				break OUTER
 			}
 		}
-		if result.NextPage == 0 {
+		if result.CurrentPage == result.LastPage {
 			break
 		}
-		page = result.NextPage
+		page = result.CurrentPage + 1
 	}
 	return found, err
 }
@@ -695,13 +700,27 @@ func (f *Fs) Mkdir(ctx context.Context, dir string) error {
 
 // deleteObject removes an object by ID
 func (f *Fs) deleteObject(ctx context.Context, id string) error {
+	if f.opt.HardDelete {
+		// Deleting forever doesn't invalidate the server's cache of
+		// the parent folder listing, so the entry keeps being listed
+		// for about a second. Moving to the trash first does.
+		err := f.deleteEntry(ctx, id, false)
+		if err != nil {
+			return err
+		}
+	}
+	return f.deleteEntry(ctx, id, f.opt.HardDelete)
+}
+
+// deleteEntry moves the entry with ID to the trash or deletes it forever
+func (f *Fs) deleteEntry(ctx context.Context, id string, deleteForever bool) error {
 	opts := rest.Opts{
 		Method: "POST",
 		Path:   "/file-entries/delete",
 	}
 	request := api.DeleteRequest{
 		EntryIDs:      []string{id},
-		DeleteForever: f.opt.HardDelete,
+		DeleteForever: deleteForever,
 	}
 	var result api.DeleteResponse
 	err := f.pacer.Call(func() (bool, error) {
@@ -709,6 +728,11 @@ func (f *Fs) deleteObject(ctx context.Context, id string) error {
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
+		// If Drime returns 422 with invalid entry ID, the object is already gone.
+		// Map this to a standard not-found error
+		if strings.Contains(err.Error(), "entry ids is invalid") {
+			return fs.ErrorObjectNotFound
+		}
 		return fmt.Errorf("failed to delete item: %w", err)
 	}
 	// Check the individual result codes also
@@ -782,10 +806,16 @@ func (f *Fs) patch(ctx context.Context, id, attribute string, value string) (ite
 		Name: value,
 	}
 	var result api.UpdateItemResponse
+	// The drime origin returns a malformed response (seen by Cloudflare as
+	// a 520) for a literal PUT to this endpoint, so use a POST with Laravel
+	// method spoofing instead - the API routes it to the same handler.
 	opts := rest.Opts{
-		Method:     "PUT",
+		Method:     "POST",
 		Path:       "/file-entries/" + id,
 		Parameters: url.Values{},
+		ExtraHeaders: map[string]string{
+			"X-HTTP-Method-Override": "PUT",
+		},
 	}
 	if f.opt.WorkspaceID != "" {
 		opts.Parameters.Set("workspaceId", f.opt.WorkspaceID)
@@ -919,6 +949,48 @@ func (f *Fs) Move(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	return dstObj, nil
 }
 
+// countDirChildren returns the number of direct children of dirID.
+func (f *Fs) countDirChildren(ctx context.Context, dirID string) (int, error) {
+	n := 0
+	_, err := f.listAll(ctx, dirID, false, false, "", func(*api.Item) bool {
+		n++
+		return false
+	})
+	return n, err
+}
+
+// waitForDirChildren polls dirID until it lists at least want direct
+// children, or the timeout elapses. Drime's folder rename has visible
+// eventual-consistency on the children listing - the rename returns
+// success immediately but the renamed folder lists as empty for a
+// short window - so callers that rename a folder use this to wait for
+// the listing to settle before returning (see issue #9450).
+func (f *Fs) waitForDirChildren(ctx context.Context, dirID string, want int) error {
+	const timeout = 30 * time.Second
+	deadline := time.Now().Add(timeout)
+	backoff := 100 * time.Millisecond
+	for {
+		got, err := f.countDirChildren(ctx, dirID)
+		if err != nil {
+			return err
+		}
+		if got >= want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for directory listing to settle: got %d, want %d", got, want)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff):
+		}
+		if backoff < 2*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
 // DirMove moves src, srcRemote to this remote at dstRemote
 // using server-side move operations.
 //
@@ -939,11 +1011,25 @@ func (f *Fs) DirMove(ctx context.Context, src fs.Fs, srcRemote, dstRemote string
 		return err
 	}
 
+	// Count children before the move so we can wait for the server's
+	// children listing to reflect the rename - see waitForDirChildren.
+	preCount, err := f.countDirChildren(ctx, srcID)
+	if err != nil {
+		return fmt.Errorf("DirMove: count source children: %w", err)
+	}
+
 	// Do the move
-	_, err = f.moveTo(ctx, srcID, srcLeaf, dstLeaf, srcDirectoryID, dstDirectoryID)
+	info, err := f.moveTo(ctx, srcID, srcLeaf, dstLeaf, srcDirectoryID, dstDirectoryID)
 	if err != nil {
 		return err
 	}
+
+	if preCount > 0 {
+		if err := f.waitForDirChildren(ctx, info.ID.String(), preCount); err != nil {
+			fs.Logf(f, "DirMove: %v (continuing)", err)
+		}
+	}
+
 	srcFs.dirCache.FlushDir(srcRemote)
 	return nil
 }
@@ -976,17 +1062,28 @@ func (f *Fs) copy(ctx context.Context, id, newDirID string) (item *api.Item, err
 }
 
 // copy and rename a file or folder to directoryID with leaf
-func (f *Fs) copyTo(ctx context.Context, srcID, srcLeaf, dstLeaf, dstDirectoryID string) (info *api.Item, err error) {
-	// Can have duplicates so don't have to be careful here
-
+//
+// If existing is set it is removed once the copy has succeeded.
+func (f *Fs) copyTo(ctx context.Context, srcID, dstLeaf, dstDirectoryID string, existing fs.Object) (info *api.Item, err error) {
 	// Copy to dstDirectoryID first
 	info, err = f.copy(ctx, srcID, dstDirectoryID)
 	if err != nil {
 		return nil, err
 	}
 
+	// The server names the copy "name (1)" if the destination
+	// directory already has an entry called "name" and refuses to
+	// rename it to "name" until that entry is removed.
+	if existing != nil {
+		fs.Debugf(existing, "Server side copy: removing existing object after successful copy")
+		err = existing.Remove(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Rename if required
-	if srcLeaf != dstLeaf {
+	if info.Name != f.opt.Enc.FromStandardName(dstLeaf) {
 		info, err = f.rename(ctx, info.ID.String(), dstLeaf)
 		if err != nil {
 			return nil, err
@@ -1010,8 +1107,6 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 		fs.Debugf(src, "Can't copy - not same remote type")
 		return nil, fs.ErrorCantCopy
 	}
-	srcLeaf := path.Base(srcObj.remote)
-
 	srcPath := srcObj.fs.rootSlash() + srcObj.remote
 	dstPath := f.rootSlash() + remote
 	if srcPath == dstPath {
@@ -1020,15 +1115,8 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 
 	// Find existing object
 	existingObj, err := f.NewObject(ctx, remote)
-	if err == nil {
-		defer func() {
-			// Don't remove existing object if returning an error
-			if err != nil {
-				return
-			}
-			fs.Debugf(existingObj, "Server side copy: removing existing object after successful copy")
-			err = existingObj.Remove(ctx)
-		}()
+	if err != nil {
+		existingObj = nil
 	}
 
 	// Create temporary object
@@ -1038,7 +1126,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (dst fs.Obj
 	}
 
 	// Copy the object
-	info, err := f.copyTo(ctx, srcObj.id, srcLeaf, dstLeaf, dstDirectoryID)
+	info, err := f.copyTo(ctx, srcObj.id, dstLeaf, dstDirectoryID, existingObj)
 	if err != nil {
 		return nil, err
 	}
@@ -1096,6 +1184,11 @@ func (f *Fs) OpenChunkWriter(ctx context.Context, remote string, src fs.ObjectIn
 		return info, nil, err
 	}
 
+	// Send just the leaf as relativePath, matching the single-part /uploads
+	// convention. The file is placed by parentId; sending an absolute path
+	// here makes the server build folders from it and drop "0" path segments.
+	relPath := f.opt.Enc.FromStandardName(leaf)
+
 	// Temporary Object under construction
 	o := &Object{
 		fs:     f,
@@ -1129,7 +1222,7 @@ func (f *Fs) OpenChunkWriter(ctx context.Context, remote string, src fs.ObjectIn
 		Size:         createSize,
 		Extension:    strings.TrimPrefix(path.Ext(leaf), `.`),
 		ParentID:     json.Number(directoryID),
-		RelativePath: f.opt.Enc.FromStandardPath(path.Join(f.root, remote)),
+		RelativePath: relPath,
 		WorkspaceID:  f.opt.WorkspaceID,
 	}
 
@@ -1156,8 +1249,6 @@ func (f *Fs) OpenChunkWriter(ctx context.Context, remote string, src fs.ObjectIn
 	if ext == "" {
 		ext = "bin"
 	}
-	rel := f.opt.Enc.FromStandardPath(path.Join(f.root, remote))
-
 	chunkWriter := &drimeChunkWriter{
 		uploadID:     resp.UploadID,
 		key:          resp.Key,
@@ -1170,7 +1261,7 @@ func (f *Fs) OpenChunkWriter(ctx context.Context, remote string, src fs.ObjectIn
 		mime:         mime,
 		extension:    ext,
 		parentID:     json.Number(directoryID),
-		relativePath: rel,
+		relativePath: relPath,
 	}
 	info = fs.ChunkWriterInfo{
 		ChunkSize:         int64(chunkSize),
@@ -1530,7 +1621,11 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 			fs.Debugf(o, "Removing old object on successful upload")
 			deleteErr := o.fs.deleteObject(ctx, id)
 			if deleteErr != nil {
-				err = fmt.Errorf("failed to delete existing object: %w", deleteErr)
+				if errors.Is(deleteErr, fs.ErrorObjectNotFound) {
+					fs.Debugf(o, "Old object already deleted, safely ignoring")
+				} else {
+					err = fmt.Errorf("failed to delete existing object: %w", deleteErr)
+				}
 			}
 		}()
 	}

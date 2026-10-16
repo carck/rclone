@@ -111,6 +111,7 @@ Optional Flags:
       --force                                Bypass --max-delete safety check and run the sync. Consider using with --verbose
   -h, --help                                 help for bisync
       --ignore-listing-checksum              Do not use checksums for listings (add --ignore-checksum to additionally skip post-copy checksum checks)
+      --max-delete-renames-aware             Exclude tracked renames from the --max-delete safety check (requires --track-renames)
       --max-lock Duration                    Consider lock files older than this to be expired (default: 0 (never expire)) (minimum: 2m) (default 0s)
       --no-cleanup                           Retain working files (useful for troubleshooting and testing).
       --no-slow-hash                         Ignore listing checksums only on backends where they are slow
@@ -183,7 +184,7 @@ will (by default) be overwritten by the Path1 filesystem version.
 (Note that this is [NOT entirely symmetrical](https://github.com/rclone/rclone/issues/5681#issuecomment-938761815),
 and more symmetrical options can be specified with the
 [`--resync-mode`](#resync-mode) flag.)
-Carefully evaluate deltas using [--dry-run](/flags/#non-backend-flags).
+Carefully evaluate deltas using [--dry-run](/docs/#n-dry-run).
 
 For a resync run, one of the paths may be empty (no files in the path tree).
 The resync run should result in files on both paths, else a normal non-resync
@@ -323,7 +324,7 @@ Time stamps and file contents for `RCLONE_TEST` files are not important, just
 the names and locations. If you have symbolic links in your sync tree it is
 recommended to place `RCLONE_TEST` files in the linked-to directory tree to
 protect against bisync assuming a bunch of deleted files if the linked-to tree
-should not be accessible. See also the [--check-filename](--check-filename) flag.
+should not be accessible. See also the [--check-filename](#check-filename) flag.
 
 ### --check-filename
 
@@ -477,9 +478,9 @@ their checksums would change from run to run (due to small variances in the
 internals of the generated export file.) Therefore, bisync automatically skips
 `--download-hash` for files with a size less than 0.
 
-See also: [`Hasher`](https://rclone.org/hasher/) backend,
-[`cryptcheck`](/commands/rclone_cryptcheck/) command, [`rclone check
---download`](/commands/rclone_check/) option,
+See also: [`Hasher`](/hasher/) backend,
+[`cryptcheck`](/commands/rclone_cryptcheck/) command,
+[`rclone check --download`](/commands/rclone_check/) option,
 [`md5sum`](/commands/rclone_md5sum/) command
 
 ### --max-delete
@@ -499,6 +500,23 @@ e.g. `--max-delete 75` (allows up to 75% deletion), or use `--force`
 to bypass the check.
 
 Also see the [all files changed](#all-files-changed) check.
+
+### --max-delete-renames-aware
+
+When `--track-renames` is in use, `--max-delete-renames-aware` can exclude
+files that are guaranteed to match as tracked renames from the deletion count.
+If the initial deletion count exceeds `--max-delete`, bisync performs a rename
+matching preflight before starting either sync direction. The run still aborts
+if the remaining unmatched deletions exceed the limit.
+
+The preflight uses the selected [`--track-renames-strategy`](/docs/#track-renames-strategy)
+and the attributes stored in the normal bisync listings. A hash strategy forces
+both listings to use a common hash and is incompatible with
+`--ignore-listing-checksum`. The option only exempts matches when the destination
+supports server-side moves or copies and the selected strategy is supported by both paths.
+It requires `--track-renames` and is disabled by default because hashing may add
+listing time. `--force` bypasses both the safety check and this preflight.
+The preflight is also disabled during `--resync`, when rename tracking is unavailable.
 
 ### --filters-file {#filters-file}
 
@@ -698,7 +716,7 @@ other, if there were changes during or after the run. This is normal, and any
 differences will be detected and synced on the next run.
 
 For a robust integrity check of the current state of the remotes (as opposed to
-just their listing snapshots), consider using [`check`](commands/rclone_check/)
+just their listing snapshots), consider using [`check`](/commands/rclone_check/)
 (or [`cryptcheck`](/commands/rclone_cryptcheck/), if at least one path is a
 `crypt` remote) instead of `--check-sync`, keeping in mind that differences are
 expected if files changed during or after your last bisync run.
@@ -932,7 +950,7 @@ conflicts, which would previously have resulted in unnecessary renames and
 duplicates. Now, when bisync comes to a file that it wants to rename (because it
 is new/changed on both sides), it first checks whether the Path1 and Path2
 versions are currently *identical* (using the same underlying function as
-[`check`](commands/rclone_check/).) If bisync concludes that the files are
+[`check`](/commands/rclone_check/).) If bisync concludes that the files are
 identical, it will skip them and move on. Otherwise, it will create renamed
 duplicates, as before. This behavior also [improves the experience of renaming
 directories](https://forum.rclone.org/t/bisync-bugs-and-feature-requests/37636#:~:text=Renamed%20directories),
@@ -1053,13 +1071,17 @@ encodings.)
 The following backends have known issues that need more investigation:
 
 <!--- start list_failures - DO NOT EDIT THIS SECTION - use make commanddocs --->
-- `TestDropbox` (`dropbox`)
-  - [`TestBisyncRemoteRemote/normalization`](https://pub.rclone.org/integration-tests/current/dropbox-cmd.bisync-TestDropbox-1.txt)
-- `TestSeafile` (`seafile`)
-  - [`TestBisyncLocalRemote/volatile`](https://pub.rclone.org/integration-tests/current/seafile-cmd.bisync-TestSeafile-1.txt)
-- `TestSeafileV6` (`seafile`)
-  - [`TestBisyncLocalRemote/volatile`](https://pub.rclone.org/integration-tests/current/seafile-cmd.bisync-TestSeafileV6-1.txt)
-- Updated: 2026-01-30-010015
+- `TestHuaweiDrive` (`huaweidrive`)
+  - [`TestBisyncRemoteLocal/ext_paths`](https://pub.rclone.org/integration-tests/current/huaweidrive-cmd.bisync-TestHuaweiDrive-1.txt)
+  - [`TestBisyncRemoteLocal/extended_filenames`](https://pub.rclone.org/integration-tests/current/huaweidrive-cmd.bisync-TestHuaweiDrive-1.txt)
+  - [`TestBisyncRemoteLocal/normalization`](https://pub.rclone.org/integration-tests/current/huaweidrive-cmd.bisync-TestHuaweiDrive-1.txt)
+  - [`TestBisyncLocalRemote/ext_paths`](https://pub.rclone.org/integration-tests/current/huaweidrive-cmd.bisync-TestHuaweiDrive-1.txt)
+  - [`TestBisyncLocalRemote/extended_filenames`](https://pub.rclone.org/integration-tests/current/huaweidrive-cmd.bisync-TestHuaweiDrive-1.txt)
+  - [4 more](https://pub.rclone.org/integration-tests/current/)
+- `TestPcloud` (`pcloud`)
+  - [`TestBisyncRemoteRemote/check_access`](https://pub.rclone.org/integration-tests/current/pcloud-cmd.bisync-TestPcloud-1.txt)
+  - [`TestBisyncRemoteRemote/rmdirs`](https://pub.rclone.org/integration-tests/current/pcloud-cmd.bisync-TestPcloud-1.txt)
+- Updated: 2026-07-31-010017
 <!--- end list_failures - DO NOT EDIT THIS SECTION - use make commanddocs --->
 
 The following backends either have not been tested recently or have known issues
@@ -1069,6 +1091,10 @@ that are deemed unfixable for the time being:
 - `TestArchive` (`archive`)
 - `TestCache` (`cache`)
 - `TestDrime` (`drime`)
+- `TestDropbox` (`dropbox`)
+  - `TestBisyncRemoteLocal/normalization`
+  - `TestBisyncLocalRemote/normalization`
+  - `TestBisyncRemoteRemote/normalization`
 - `TestFileLu` (`filelu`)
 - `TestFilesCom` (`filescom`)
 - `TestImageKit` (`imagekit`)
@@ -1088,7 +1114,6 @@ that are deemed unfixable for the time being:
 - `TestS3Rclone` (`s3`)
 - `TestSFTPRsyncNet` (`sftp`)
 - `TestStorj` (`storj`)
-- `TestWebdavInfiniteScale` (`webdav`)
 - `TestWebdavNextcloud` (`webdav`)
 - `TestWebdavOwncloud` (`webdav`)
 - `TestnStorage` (`netstorage`)
@@ -1124,8 +1149,8 @@ a mechanism to mark files as needing to be internally rechecked next time, for
 added safety. It should therefore no longer be necessary to sync only at quiet
 times -- however, note that an error can still occur if a file happens to change
 at the exact moment it's being read/written by bisync (same as would happen in
-`rclone sync`.) (See also: [`--ignore-checksum`](https://rclone.org/docs/#ignore-checksum),
-[`--local-no-check-updated`](https://rclone.org/local/#local-no-check-updated))
+`rclone sync`.) (See also: [`--ignore-checksum`](/docs/#ignore-checksum),
+[`--local-no-check-updated`](/local/#local-no-check-updated))
 
 ### Empty directories
 
@@ -1164,6 +1189,11 @@ Otherwise, the most effective and efficient method of renaming a directory
 is to rename it to the same name on both sides. (As of `rclone v1.64`,
 a `--resync` is no longer required after doing so, as bisync will automatically
 detect that Path1 and Path2 are in agreement.)
+
+By default, renamed or moved files are still counted as deleted files for
+purposes of `--max-delete`, because the safety check happens before rename
+detection. Use `--max-delete-renames-aware` together with `--track-renames` to
+run a rename preflight and exclude guaranteed matches from this count.
 
 ### `--fast-list` used by default
 
@@ -1498,7 +1528,7 @@ and in most cases it's probably not what you want!
 
 To bisync Google Docs as URL shortcut links (in a manner similar to "Drive for
 Desktop"), use: `--drive-export-formats url` (or
-[alternatives](https://rclone.org/drive/#exportformats:~:text=available%20Google%20Documents.-,Extension,macOS,-Standard%20options).)
+[alternatives](/drive/#exportformats:~:text=available%20Google%20Documents.-,Extension,macOS,-Standard%20options).)
 
 Note that these link files cannot be edited on the non-drive side -- you will
 get errors if you try to sync an edited link file back to drive. They CAN be
@@ -1903,6 +1933,35 @@ about *Unison* and synchronization in general.
 
 ## Changelog
 
+### `v1.76`
+
+- Added `--max-delete-renames-aware` to exclude guaranteed tracked renames from
+the `--max-delete` safety check when used with `--track-renames`.
+- Fixed an issue causing the conflict winner to be missing from listings when
+Path2 won.
+- Fixed an issue causing `--conflict-resolve` to compare a zero size or modtime.
+- Fixed an issue causing an endless retry loop for certain skipped files.
+- When a file changed on both sides has an unexpectedly blank hash (for example,
+an S3 multipart object without an MD5), bisync now compares it by downloading
+it, as with `--download`, instead of by size alone.
+- Fixed an issue causing a `--resync` to fail with "path1 and path2 are out of
+sync", or later runs to report changes that didn't happen, when a file's new
+modtime was less than a second earlier than the one in the listing.
+- Fixed an issue causing the rc `sync/bisync` call to ignore a dry run set with
+`_config` or the flat `dry_run` option.
+- Fixed an issue causing the rc `sync/bisync` call to ignore the global
+`--max-delete` and use a limit of 0% when `maxDelete` was not set.
+- `--max-delete` now enforces a maximum of 100.
+- Fixed an issue causing the rc `sync/bisync` call to ignore the `backupdir1` and
+`backupdir2` parameters (the names used before v1.74).
+- Fixed an issue causing the rc `sync/bisync` call to treat a parameter with an
+invalid value as if it were missing, instead of returning an error.
+
+### `v1.74.2`
+
+- Fixed an issue causing `--conflict-loser pathname` to produce unexpected
+behavior if using a non-default `--conflict-resolve` value.
+
 ### `v1.74`
 
 - Added several missing `rc` parameters.
@@ -1944,7 +2003,7 @@ and far less prone to critical errors / undetected changes
 - Bisync is now capable of rolling a file listing back in cases of uncertainty,
 essentially marking the file as needing to be rechecked next time.
 - A few basic terminal colors are now supported, controllable with
-[`--color`](/docs/#color) (`AUTO`|`NEVER`|`ALWAYS`)
+[`--color`](/docs/#color-auto-never-always) (`AUTO`|`NEVER`|`ALWAYS`)
 - Initial listing snapshots of Path1 and Path2 are now generated concurrently,
 using the same "march" infrastructure as `check` and `sync`,
 for performance improvements and less
@@ -1957,7 +2016,7 @@ for performance improvements and less
 options as in `sync`)
 - Equality checks before a sync conflict rename now fall back to `cryptcheck`
 (when possible) or `--download`,
-instead of of `--size-only`, when `check` is not available.
+instead of `--size-only`, when `check` is not available.
 - Bisync no longer fails to find the correct listing file when configs are
 overridden with backend-specific flags.
 - Bisync now fully supports comparing based on any combination of size, modtime,
@@ -1974,7 +2033,7 @@ behavior with new [`--conflict-resolve`](#conflict-resolve),
 [`--conflict-suffix`](#conflict-suffix) flags.
 - A new [`--resync-mode`](#resync-mode) flag allows more control over which
 version of a file gets kept during a `--resync`.
-- Bisync now supports [`--retries`](/docs/#retries-int) and [`--retries-sleep`](/docs/#retries-sleep-time)
+- Bisync now supports [`--retries`](/docs/#retries-int) and [`--retries-sleep`](/docs/#retries-sleep-duration)
 (when [`--resilient`](#resilient) is set.)
 
 ### `v1.64`
